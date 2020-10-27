@@ -36,7 +36,6 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
-	"github.com/viki-org/dnscache"
 	"golang.org/x/net/http2"
 	"golang.org/x/time/rate"
 
@@ -44,12 +43,10 @@ import (
 	"github.com/loadimpact/k6/lib"
 	"github.com/loadimpact/k6/lib/consts"
 	"github.com/loadimpact/k6/lib/netext"
+	"github.com/loadimpact/k6/lib/types"
 	"github.com/loadimpact/k6/loader"
 	"github.com/loadimpact/k6/stats"
 )
-
-//nolint:gochecknoglobals
-var errInterrupt = errors.New("context cancelled")
 
 // Ensure Runner implements the lib.Runner interface
 var _ lib.Runner = &Runner{}
@@ -60,8 +57,10 @@ type Runner struct {
 	defaultGroup *lib.Group
 
 	BaseDialer net.Dialer
-	Resolver   *dnscache.Resolver
-	RPSLimit   *rate.Limiter
+	Resolver   netext.Resolver
+	// TODO: Remove ActualResolver, it's a hack to simplify mocking in tests.
+	ActualResolver netext.MultiResolver
+	RPSLimit       *rate.Limiter
 
 	console   *console
 	setupData []byte
@@ -95,6 +94,7 @@ func newFromBundle(logger *logrus.Logger, b *Bundle) (*Runner, error) {
 		return nil, err
 	}
 
+	defDNS := types.DefaultDNSConfig()
 	r := &Runner{
 		Bundle:       b,
 		Logger:       logger,
@@ -104,8 +104,10 @@ func newFromBundle(logger *logrus.Logger, b *Bundle) (*Runner, error) {
 			KeepAlive: 30 * time.Second,
 			DualStack: true,
 		},
-		console:  newConsole(logger),
-		Resolver: dnscache.New(0),
+		console: newConsole(logger),
+		Resolver: netext.NewResolver(
+			net.LookupIP, 0, defDNS.Select.DNSSelect, defDNS.Policy.DNSPolicy),
+		ActualResolver: net.LookupIP,
 	}
 
 	err = r.SetOptions(r.Bundle.Options)
@@ -159,10 +161,11 @@ func (r *Runner) newVU(id int64, samplesOut chan<- stats.SampleContainer) (*VU, 
 	}
 
 	dialer := &netext.Dialer{
-		Dialer:    r.BaseDialer,
-		Resolver:  r.Resolver,
-		Blacklist: r.Bundle.Options.BlacklistIPs,
-		Hosts:     r.Bundle.Options.Hosts,
+		Dialer:           r.BaseDialer,
+		Resolver:         r.Resolver,
+		Blacklist:        r.Bundle.Options.BlacklistIPs,
+		BlockedHostnames: r.Bundle.Options.BlockedHostnames.Trie,
+		Hosts:            r.Bundle.Options.Hosts,
 	}
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: r.Bundle.Options.InsecureSkipTLSVerify.Bool,
@@ -318,7 +321,62 @@ func (r *Runner) SetOptions(opts lib.Options) error {
 		r.console = c
 	}
 
+	// FIXME: Resolver probably shouldn't be reset here...
+	// It's done because the js.Runner is created before the full
+	// configuration has been processed, at which point we don't have
+	// access to the DNSConfig, and need to wait for this SetOptions
+	// call that happens after all config has been assembled.
+	// We could make DNSConfig part of RuntimeOptions, but that seems
+	// conceptually wrong since the JS runtime doesn't care about it
+	// (it needs the actual resolver, not the config), and it would
+	// require an additional field on Bundle to pass the config through,
+	// which is arguably worse than this.
+	if err := r.setResolver(opts.DNS); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+func (r *Runner) setResolver(dns types.DNSConfig) error {
+	ttl, err := parseTTL(dns.TTL.String)
+	if err != nil {
+		return err
+	}
+
+	dnsSel := dns.Select
+	if !dnsSel.Valid {
+		dnsSel = types.DefaultDNSConfig().Select
+	}
+	dnsPol := dns.Policy
+	if !dnsPol.Valid {
+		dnsPol = types.DefaultDNSConfig().Policy
+	}
+	r.Resolver = netext.NewResolver(
+		r.ActualResolver, ttl, dnsSel.DNSSelect, dnsPol.DNSPolicy)
+
+	return nil
+}
+
+func parseTTL(ttlS string) (time.Duration, error) {
+	ttl := time.Duration(0)
+	switch ttlS {
+	case "inf":
+		// cache "infinitely"
+		ttl = time.Hour * 24 * 365
+	case "0":
+		// disable cache
+	case "":
+		ttlS = types.DefaultDNSConfig().TTL.String
+		fallthrough
+	default:
+		var err error
+		ttl, err = types.ParseExtendedDurationMs(ttlS)
+		if ttl < 0 || err != nil {
+			return ttl, fmt.Errorf("invalid DNS TTL: %s", ttlS)
+		}
+	}
+	return ttl, nil
 }
 
 // Runs an exported function in its own temporary VU, optionally with an argument. Execution is
@@ -343,7 +401,7 @@ func (r *Runner) runPart(ctx context.Context, out chan<- stats.SampleContainer, 
 	defer cancel()
 	go func() {
 		<-ctx.Done()
-		vu.Runtime.Interrupt(errInterrupt)
+		vu.Runtime.Interrupt(context.Canceled)
 	}()
 	*vu.Context = ctx
 
@@ -361,8 +419,8 @@ func (r *Runner) runPart(ctx context.Context, out chan<- stats.SampleContainer, 
 
 	// deadline is reached so we have timeouted but this might've not been registered correctly
 	if deadline, ok := ctx.Deadline(); ok && time.Now().After(deadline) {
-		// we could have an error that is not errInterrupt in which case we should return it instead
-		if err, ok := err.(*goja.InterruptedError); ok && v != nil && err.Value() != errInterrupt {
+		// we could have an error that is not context.Canceled in which case we should return it instead
+		if err, ok := err.(*goja.InterruptedError); ok && v != nil && err.Value() != context.Canceled {
 			// TODO: silence this error?
 			return v, err
 		}
@@ -474,7 +532,7 @@ func (u *VU) Activate(params *lib.VUActivationParams) lib.ActiveVU {
 		// Wait for the run context to be over
 		<-params.RunContext.Done()
 		// Interrupt the JS runtime
-		u.Runtime.Interrupt(errInterrupt)
+		u.Runtime.Interrupt(context.Canceled)
 		// Wait for the VU to stop running, if it was, and prevent it from
 		// running again for this activation
 		avu.busy <- struct{}{}
@@ -522,7 +580,7 @@ func (u *ActiveVU) RunOnce() error {
 	// Call the exported function.
 	_, isFullIteration, totalTime, err := u.runFn(u.RunContext, true, fn, u.setupData)
 
-	// If MinIterationDuration is specified and the iteration wasn't cancelled
+	// If MinIterationDuration is specified and the iteration wasn't canceled
 	// and was less than it, sleep for the remainder
 	if isFullIteration && u.Runner.Bundle.Options.MinIterationDuration.Valid {
 		durationDiff := time.Duration(u.Runner.Bundle.Options.MinIterationDuration.Duration) - totalTime

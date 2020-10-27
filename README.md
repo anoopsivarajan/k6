@@ -1,4 +1,4 @@
-<p align="center"><a href="https://k6.io/"><img src="logo.svg" alt="k6" width="220" height="213" /></a></p>
+<p align="center"><a href="https://k6.io/"><img src="assets/logo.svg" alt="k6" width="220" height="213" /></a></p>
 
 <h3 align="center">Like unit testing, for performance</h3>
 <p align="center">A modern load testing tool for developers and testers in the DevOps era.</p>
@@ -20,7 +20,7 @@
 </p>
 
 <br/>
-<img src="github-hr.png" alt="---" />
+<img src="assets/github-hr.png" alt="---" />
 <br/>
 
 **k6** is a modern load testing tool, building on [Load Impact](https://loadimpact.com/)'s years of experience in the load and performance testing industry. It provides a clean, approachable scripting API, [local](https://k6.io/docs/getting-started/running-k6) and [cloud execution](https://k6.io/docs/cloud), and flexible configuration.
@@ -28,7 +28,7 @@
 This is how load testing should look in the 21st century.
 
 <p align="center">
-  <img width="600" src="./assets/k6-demo.gif">
+  <img width="600" src="assets/k6-demo.gif">
 </p>
 
 Menu
@@ -301,13 +301,13 @@ export let options = {
 
 // Main function
 export default function () {
-    let response = http.get("https://test.loadimpact.com/");
+    let response = http.get("https://test.k6.io/");
 
     // check() returns false if any of the specified conditions fail
     let checkRes = check(response, {
         "http2 is used": (r) => r.proto === "HTTP/2.0",
         "status is 200": (r) => r.status === 200,
-        "content is present": (r) => r.body.indexOf("Welcome to the LoadImpact.com demo site!") !== -1,
+        "content is present": (r) => r.body.indexOf("Collection of simple web-pages suitable for load testing.") !== -1,
     });
 
     // We reverse the check() result since we want to count the failures
@@ -317,8 +317,9 @@ export default function () {
     group("Static Assets", function () {
         // Execute multiple requests in parallel like a browser, to fetch some static resources
         let resps = http.batch([
-            ["GET", "https://test.loadimpact.com/style.css", null, { tags: { staticAsset: "yes" } }],
-            ["GET", "https://test.loadimpact.com/images/logo.png", null, { tags: { staticAsset: "yes" } }]
+            ["GET", "https://test.k6.io/static/css/site.css", null, { tags: { staticAsset: "yes" } }],
+            ["GET", "https://test.k6.io/static/favicon.ico", null, { tags: { staticAsset: "yes" } }],
+            ["GET", "https://test.k6.io/static/js/prisms.js", null, { tags: { staticAsset: "yes" } }],
         ]);
         // Combine check() call with failure tracking
         failureRate.add(!check(resps, {

@@ -578,7 +578,7 @@ func TestVURunInterrupt(t *testing.T) {
 			activeVU := vu.Activate(&lib.VUActivationParams{RunContext: ctx})
 			err = activeVU.RunOnce()
 			assert.Error(t, err)
-			assert.Contains(t, err.Error(), "context cancelled")
+			assert.Contains(t, err.Error(), "context canceled")
 		})
 	}
 }
@@ -624,7 +624,7 @@ func TestVURunInterruptDoesntPanic(t *testing.T) {
 					close(ch)
 					vuErr := vu.RunOnce()
 					assert.Error(t, vuErr)
-					assert.Contains(t, vuErr.Error(), "context cancelled")
+					assert.Contains(t, vuErr.Error(), "context canceled")
 				}()
 				<-ch
 				time.Sleep(time.Millisecond * 1) // NOTE: increase this in case of problems ;)
@@ -881,6 +881,77 @@ func TestVUIntegrationBlacklistScript(t *testing.T) {
 			err = vu.RunOnce()
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "IP (10.1.2.3) is in a blacklisted range (10.0.0.0/8)")
+		})
+	}
+}
+
+func TestVUIntegrationBlockHostnamesOption(t *testing.T) {
+	r1, err := getSimpleRunner(t, "/script.js", `
+					var http = require("k6/http");
+					exports.default = function() { http.get("https://k6.io/"); }
+				`)
+	require.NoError(t, err)
+
+	hostnames, err := types.NewNullHostnameTrie([]string{"*.io"})
+	require.NoError(t, err)
+	require.NoError(t, r1.SetOptions(lib.Options{
+		Throw:            null.BoolFrom(true),
+		BlockedHostnames: hostnames,
+	}))
+
+	r2, err := NewFromArchive(testutils.NewLogger(t), r1.MakeArchive(), lib.RuntimeOptions{})
+	if !assert.NoError(t, err) {
+		return
+	}
+
+	runners := map[string]*Runner{"Source": r1, "Archive": r2}
+
+	for name, r := range runners {
+		r := r
+		t.Run(name, func(t *testing.T) {
+			initVu, err := r.NewVU(1, make(chan stats.SampleContainer, 100))
+			require.NoError(t, err)
+			vu := initVu.Activate(&lib.VUActivationParams{RunContext: context.Background()})
+			err = vu.RunOnce()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "hostname (k6.io) is in a blocked pattern (*.io)")
+		})
+	}
+}
+
+func TestVUIntegrationBlockHostnamesScript(t *testing.T) {
+	r1, err := getSimpleRunner(t, "/script.js", `
+					var http = require("k6/http");
+
+					exports.options = {
+						throw: true,
+						blockHostnames: ["*.io"],
+					};
+
+					exports.default = function() { http.get("https://k6.io/"); }
+				`)
+	if !assert.NoError(t, err) {
+		return
+	}
+
+	r2, err := NewFromArchive(testutils.NewLogger(t), r1.MakeArchive(), lib.RuntimeOptions{})
+	if !assert.NoError(t, err) {
+		return
+	}
+
+	runners := map[string]*Runner{"Source": r1, "Archive": r2}
+
+	for name, r := range runners {
+		r := r
+		t.Run(name, func(t *testing.T) {
+			initVu, err := r.NewVU(0, make(chan stats.SampleContainer, 100))
+			if !assert.NoError(t, err) {
+				return
+			}
+			vu := initVu.Activate(&lib.VUActivationParams{RunContext: context.Background()})
+			err = vu.RunOnce()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "hostname (k6.io) is in a blocked pattern (*.io)")
 		})
 	}
 }

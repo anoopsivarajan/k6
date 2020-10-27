@@ -42,6 +42,7 @@ import (
 
 	"github.com/loadimpact/k6/lib/metrics"
 	"github.com/loadimpact/k6/lib/netext"
+	"github.com/loadimpact/k6/lib/types"
 	"github.com/loadimpact/k6/stats"
 )
 
@@ -55,7 +56,10 @@ func TestTracer(t *testing.T) {
 
 	transport, ok := srv.Client().Transport.(*http.Transport)
 	assert.True(t, ok)
-	transport.DialContext = netext.NewDialer(net.Dialer{}).DialContext
+	transport.DialContext = netext.NewDialer(
+		net.Dialer{},
+		netext.NewResolver(net.LookupIP, 0, types.DNSfirst, types.DNSpreferIPv4),
+	).DialContext
 
 	var prev int64
 	assertLaterOrZero := func(t *testing.T, val int64, canBeZero bool) {
@@ -87,7 +91,6 @@ func TestTracer(t *testing.T) {
 			trail.SaveSamples(stats.IntoSampleTags(&map[string]string{"tag": "value"}))
 			samples := trail.GetSamples()
 
-			assert.Empty(t, tracer.protoErrors)
 			assertLaterOrZero(t, tracer.getConn, isReuse)
 			assertLaterOrZero(t, tracer.connectStart, isReuse)
 			assertLaterOrZero(t, tracer.connectDone, isReuse)
@@ -207,10 +210,6 @@ func TestTracerError(t *testing.T) {
 				tracer.Trace())))
 
 	assert.Error(t, err)
-
-	assert.Len(t, tracer.protoErrors, 1)
-	assert.Error(t, tracer.protoErrors[0])
-	assert.Equal(t, tracer.protoErrors, tracer.Done().Errors)
 }
 
 func TestCancelledRequest(t *testing.T) {
@@ -221,20 +220,20 @@ func TestCancelledRequest(t *testing.T) {
 	cancelTest := func(t *testing.T) {
 		t.Parallel()
 		tracer := &Tracer{}
-		req, err := http.NewRequest("GET", srv.URL+"/delay/1", nil)
+		req, err := http.NewRequestWithContext(context.Background(), "GET", srv.URL+"/delay/1", nil)
 		require.NoError(t, err)
 
 		ctx, cancel := context.WithCancel(httptrace.WithClientTrace(req.Context(), tracer.Trace()))
 		req = req.WithContext(ctx)
 		go func() {
-			time.Sleep(time.Duration(rand.Int31n(50)) * time.Millisecond)
+			time.Sleep(time.Duration(rand.Int31n(50)) * time.Millisecond) //nolint:gosec
 			cancel()
 		}()
 
-		resp, err := srv.Client().Transport.RoundTrip(req)
-		trail := tracer.Done()
-		if resp == nil && err == nil && len(trail.Errors) == 0 {
-			t.Errorf("Expected either a RoundTrip response, error or trail errors but got %#v, %#v and %#v", resp, err, trail.Errors)
+		resp, err := srv.Client().Transport.RoundTrip(req) //nolint:bodyclose
+		_ = tracer.Done()
+		if resp == nil && err == nil {
+			t.Errorf("Expected either a RoundTrip response or error but got %#v and %#v", resp, err)
 		}
 	}
 
