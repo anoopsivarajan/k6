@@ -3,8 +3,11 @@ package dns
 import (
 	"context"
 	"encoding/json"
-	"net"
+	"strings"
 	"time"
+
+	"github.com/loadimpact/k6/js/internal/modules"
+	miekg "github.com/miekg/dns"
 )
 
 //DNS type
@@ -16,42 +19,98 @@ type Setup struct {
 	Timeout int    `json:"timeOut"`
 }
 
+type qData struct {
+	Domain string `json:"domain"`
+	QType  string `json:"qType"`
+}
+
+type optRecords struct {
+	ID    int    `json:"id"`
+	Value string `json:"value"`
+}
+
 //New creates DNS instance
 func New() *DNS {
 	return &DNS{}
 }
 
-func parseSetup(params map[string]interface{}) Setup {
-	var setup Setup
+func init() {
+	modules.Register("k6/dns", New())
+}
+
+func parseData(params map[string]interface{}) qData {
+	var data qData
 	values, _ := json.Marshal(params)
-	_ = json.Unmarshal(values, &setup)
-	return setup
+	_ = json.Unmarshal(values, &data)
+	return data
 }
 
-func updateResolver(setup Setup) {
-	if setup.Timeout == 0 {
-		setup.Timeout = 10000
+//BuildMessage builds dns message
+func (d *DNS) BuildMessage(ctx context.Context, data map[string]interface{}) []byte {
+	values := parseData(data)
+
+	if values.Domain == "" || values.QType == "" {
+		return nil
 	}
-	resolver := &net.Resolver{
-		PreferGo: false,
-		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			d := net.Dialer{
-				Timeout: time.Millisecond * time.Duration(setup.Timeout),
-			}
-			return d.DialContext(ctx, "udp", setup.Server)
-		},
-	}
-	net.DefaultResolver = resolver
+
+	msg := createMessage(values.Domain, values.QType)
+	mm, _ := msg.Pack()
+	return mm
 }
 
-//Resolve resolves the dns request
-func (d *DNS) Resolve(ctx context.Context, address string, params map[string]interface{}) ([]string, error) {
-	//Parse params from the script
-	setup := parseSetup(params)
-	//check if there is a customer resolver ip
-	if setup.Server != "" {
-		updateResolver(setup)
+//UnpackMessage unpacks dnsmessage
+func (d *DNS) UnpackMessage(ctx context.Context, data []byte) *miekg.Msg {
+	var msg = new(miekg.Msg)
+
+	msg.Unpack(data)
+	return msg
+}
+
+//Response info miekg
+type Response struct {
+	Data     *miekg.Msg `json:"data"`
+	Duration int64      `json:"duration"`
+}
+
+//SendUDP function
+func (*DNS) SendUDP(ctx context.Context, domain string, qType string, server string) (Response, error) {
+	var m = createMessage(domain, qType)
+	start := time.Now()
+	client := new(miekg.Client)
+	r, _, err := client.Exchange(m, server)
+	if err != nil {
+		return Response{}, err
 	}
-	//Return the IP address
-	return net.LookupHost(address)
+	end := time.Since(start)
+	return Response{Data: r, Duration: end.Milliseconds()}, err
+}
+
+//CreateMessage message
+func createMessage(domain string, qType string) *miekg.Msg {
+	var mm = new(miekg.Msg)
+	mm.SetQuestion(domain+".", getTypeFromString(qType))
+	return mm
+}
+
+var types = map[string]uint16{
+	"A":     miekg.TypeA,
+	"AAAA":  miekg.TypeAAAA,
+	"MX":    miekg.TypeMX,
+	"Any":   miekg.TypeANY,
+	"NS":    miekg.TypeNS,
+	"CNAME": miekg.TypeCNAME,
+	"PTR":   miekg.TypePTR,
+	"TXT":   miekg.TypeTXT,
+	"SRV":   miekg.TypeSRV,
+	"OPT":   miekg.TypeOPT,
+}
+
+// GetTypeFromString returns the request type equivalent
+func getTypeFromString(qType string) uint16 {
+	requestType := miekg.TypeA
+	typeFromMap := types[strings.ToUpper(qType)]
+	if typeFromMap != 0 {
+		requestType = typeFromMap
+	}
+	return requestType
 }
