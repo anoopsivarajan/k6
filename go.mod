@@ -47,6 +47,7 @@ require (
 	github.com/mattn/go-colorable v0.0.9
 	github.com/mattn/go-isatty v0.0.4
 	github.com/mccutchen/go-httpbin v1.1.2-0.20190116014521-c5cb2f4802fa
+	github.com/miekg/dns v1.1.35
 	github.com/mitchellh/mapstructure v0.0.0-20180220230111-00c29f56e238
 	github.com/nu7hatch/gouuid v0.0.0-20131221200532-179d4d0c4d8d
 	github.com/onsi/ginkgo v1.14.0 // indirect
@@ -69,7 +70,7 @@ require (
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasttemplate v0.0.0-20170224212429-dcecefd839c4 // indirect
 	github.com/zyedidia/highlight v0.0.0-20170330143449-201131ce5cf5
-	golang.org/x/crypto v0.0.0-20191011191535-87dc89f01550
+	golang.org/x/crypto v0.0.0-20201124201722-c8d3bf9c5392
 	golang.org/x/net v0.0.0-20200520004742-59133d7f0dd7
 	golang.org/x/text v0.3.3
 	golang.org/x/time v0.0.0-20170927054726-6dc17368e09b
@@ -88,7 +89,7 @@ replace (
 	github.com/davecgh/go-spew => github.com/davecgh/go-spew v1.1.0
 	github.com/stretchr/testify => github.com/stretchr/testify v1.2.1
 	github.com/ugorji/go => github.com/ugorji/go v0.0.0-20180112141927-9831f2c3ac10
-	golang.org/x/crypto => golang.org/x/crypto v0.0.0-20180308185624-c7dcf104e3a7
+	// golang.org/x/crypto => golang.org/x/crypto v0.0.0-20180308185624-c7dcf104e3a7
 	golang.org/x/net => golang.org/x/net v0.0.0-20181201002055-351d144fa1fc
 	golang.org/x/text => golang.org/x/text v0.3.0
 	gopkg.in/yaml.v2 => gopkg.in/yaml.v2 v2.1.1
