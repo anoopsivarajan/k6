@@ -21,6 +21,7 @@
 package js
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -28,6 +29,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/cookiejar"
+	"runtime/debug"
 	"strconv"
 	"time"
 
@@ -167,6 +169,14 @@ func (r *Runner) newVU(id int64, samplesOut chan<- stats.SampleContainer) (*VU, 
 		BlockedHostnames: r.Bundle.Options.BlockedHostnames.Trie,
 		Hosts:            r.Bundle.Options.Hosts,
 	}
+	if r.Bundle.Options.LocalIPs.Valid {
+		var ipIndex uint64
+		if id > 0 {
+			ipIndex = uint64(id - 1)
+		}
+		dialer.Dialer.LocalAddr = &net.TCPAddr{IP: r.Bundle.Options.LocalIPs.Pool.GetIP(ipIndex)}
+	}
+
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: r.Bundle.Options.InsecureSkipTLSVerify.Bool,
 		CipherSuites:       cipherSuites,
@@ -304,7 +314,6 @@ func (r *Runner) IsExecutable(name string) bool {
 
 func (r *Runner) SetOptions(opts lib.Options) error {
 	r.Bundle.Options = opts
-
 	r.RPSLimit = nil
 	if rps := opts.RPS; rps.Valid {
 		r.RPSLimit = rate.NewLimiter(rate.Limit(rps.Int64), 1)
@@ -313,7 +322,7 @@ func (r *Runner) SetOptions(opts lib.Options) error {
 	// TODO: validate that all exec values are either nil or valid exported methods (or HTTP requests in the future)
 
 	if opts.ConsoleOutput.Valid {
-		c, err := newFileConsole(opts.ConsoleOutput.String)
+		c, err := newFileConsole(opts.ConsoleOutput.String, r.Logger.Formatter)
 		if err != nil {
 			return err
 		}
@@ -594,9 +603,8 @@ func (u *ActiveVU) RunOnce() error {
 
 func (u *VU) runFn(
 	ctx context.Context, isDefault bool, fn goja.Callable, args ...goja.Value,
-) (goja.Value, bool, time.Duration, error) {
+) (v goja.Value, isFullIteration bool, t time.Duration, err error) {
 	if !u.Runner.Bundle.Options.NoCookiesReset.ValueOrZero() {
-		var err error
 		u.state.CookieJar, err = cookiejar.New(nil)
 		if err != nil {
 			return goja.Undefined(), false, time.Duration(0), err
@@ -614,11 +622,26 @@ func (u *VU) runFn(
 	u.Runtime.Set("__ITER", u.Iteration)
 	u.Iteration++
 
+	defer func() {
+		if r := recover(); r != nil {
+			gojaStack := u.Runtime.CaptureCallStack(20, nil)
+			err = fmt.Errorf("a panic occurred in VU code but was caught: %s", r)
+			// TODO figure out how to use PanicLevel without panicing .. this might require changing
+			// the logger we use see
+			// https://github.com/sirupsen/logrus/issues/1028
+			// https://github.com/sirupsen/logrus/issues/993
+			b := new(bytes.Buffer)
+			for _, s := range gojaStack {
+				s.Write(b)
+			}
+			u.state.Logger.Log(logrus.ErrorLevel, "panic: ", r, "\n", string(debug.Stack()), "\nGoja stack:\n", b.String())
+		}
+	}()
+
 	startTime := time.Now()
-	v, err := fn(goja.Undefined(), args...) // Actually run the JS script
+	v, err = fn(goja.Undefined(), args...) // Actually run the JS script
 	endTime := time.Now()
 
-	var isFullIteration bool
 	select {
 	case <-ctx.Done():
 		isFullIteration = false

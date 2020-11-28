@@ -23,12 +23,17 @@ package grpc
 import (
 	"bytes"
 	"context"
+	"net/url"
+	"os"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/dop251/goja"
 	"github.com/sirupsen/logrus"
+	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -39,10 +44,13 @@ import (
 
 	"github.com/loadimpact/k6/js/common"
 	"github.com/loadimpact/k6/lib"
+	"github.com/loadimpact/k6/lib/fsext"
 	"github.com/loadimpact/k6/lib/metrics"
 	"github.com/loadimpact/k6/lib/testutils/httpmultibin"
 	"github.com/loadimpact/k6/stats"
 )
+
+const isWindows = runtime.GOOS == "windows"
 
 func assertMetricEmitted(t *testing.T, metric *stats.Metric, sampleContainers []stats.SampleContainer, url string) {
 	seenMetric := false
@@ -87,13 +95,30 @@ func TestClient(t *testing.T) {
 		},
 	}
 
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+
+	fs := afero.NewOsFs()
+	if isWindows {
+		fs = fsext.NewTrimFilePathSeparatorFs(fs)
+	}
+
+	initEnv := &common.InitEnvironment{
+		Logger: logrus.New(),
+		CWD:    &url.URL{Path: cwd},
+		FileSystems: map[string]afero.Fs{
+			"file": fs,
+		},
+	}
+
 	ctx := common.WithRuntime(context.Background(), rt)
+	ctx = common.WithInitEnv(ctx, initEnv)
 
 	rt.Set("grpc", common.Bind(rt, New(), &ctx))
 
 	t.Run("New", func(t *testing.T) {
 		_, err := common.RunString(rt, `
-			var client = grpc.newClient();
+			var client = new grpc.Client();
 			if (!client) throw new Error("no client created")
 		`)
 		assert.NoError(t, err)
@@ -101,7 +126,7 @@ func TestClient(t *testing.T) {
 
 	t.Run("LoadNotFound", func(t *testing.T) {
 		_, err := common.RunString(rt, `
-			client.load([], "./does_not_exist.proto");	
+			client.load([], "./does_not_exist.proto");
 		`)
 		if !assert.Error(t, err) {
 			return
@@ -115,7 +140,7 @@ func TestClient(t *testing.T) {
 
 	t.Run("Load", func(t *testing.T) {
 		respV, err := common.RunString(rt, `
-			client.load([], "../../../../vendor/google.golang.org/grpc/test/grpc_testing/test.proto");	
+			client.load([], "../../../../vendor/google.golang.org/grpc/test/grpc_testing/test.proto");
 		`)
 		if !assert.NoError(t, err) {
 			return
