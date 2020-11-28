@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/loadimpact/k6/js/internal/modules"
 	miekg "github.com/miekg/dns"
 )
 
@@ -31,6 +32,10 @@ type optRecords struct {
 //New creates DNS instance
 func New() *DNS {
 	return &DNS{}
+}
+
+func init() {
+	modules.Register("k6/dns", New())
 }
 
 func parseData(params map[string]interface{}) qData {
